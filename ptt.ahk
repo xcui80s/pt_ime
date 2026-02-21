@@ -18,7 +18,7 @@ WHISPER_PORT := 8989
 TMP_DIR      := A_ScriptDir "\tmp"
 WAV_BASENAME := "recording"   ; base name prefix — timestamp suffix added per press
 LANGUAGE     := "auto"   ; "auto" for Chinese+English, "zh", or "en"
-PROMPT       := "输出简体中文。你好，这是一段语音输入。今天天气怎么样？很好！How are you? I like the city and people here."
+PROMPT       := "你好，这是一段语音输入。请把它转换成文字！检测中文和英文，中文输出简体中文。Hello, this is a voice input. Please convert it to text! Detect Chinese and English, output Chinese in simplified form."
 
 
 DirCreate(TMP_DIR)
