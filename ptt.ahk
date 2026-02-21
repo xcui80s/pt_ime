@@ -40,6 +40,19 @@ global warmProc    := 0   ; pre-warm process — keeps audio device open between
 global targetWin   := 0
 
 ; ==============================================================================
+; Tooltip — fixed at bottom-center of primary monitor
+; ==============================================================================
+
+ShowTip(text, timeout := 0) {
+    w := StrLen(text) * 8 + 24   ; rough pixel width estimate
+    x := (A_ScreenWidth  - w)  // 2
+    y :=  A_ScreenHeight - 80
+    ToolTip(text, x, y)
+    if timeout > 0
+        SetTimer(() => ToolTip(), -timeout)
+}
+
+; ==============================================================================
 ; FFmpeg warm-up — keeps dshow device initialized so F8 press starts instantly
 ; ==============================================================================
 
@@ -47,19 +60,30 @@ StartWarmFFmpeg() {
     global warmProc, TMP_DIR, AUDIO_DEVICE
     warmFile := TMP_DIR "\warmup.wav"
     cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' warmFile '"'
-    wsh := ComObject("WScript.Shell")
-    try warmProc := wsh.Exec(cmd)
+    try Run(cmd, , "Hide", &pid)
+    catch
+        return
+    warmProc := pid
 }
 
 StopWarmFFmpeg() {
     global warmProc
     if warmProc {
-        try {
-            warmProc.StdIn.WriteLine("q")
-            warmProc.StdIn.Close()
-        }
+        ProcessClose(warmProc)   ; warmup WAV is discarded, no need for graceful stop
         warmProc := 0
     }
+}
+
+; Send Ctrl+C to a hidden FFmpeg process to flush and close the WAV properly
+StopFFmpegGraceful(pid) {
+    if !pid
+        return
+    DllCall("AttachConsole",        "UInt", pid)
+    DllCall("SetConsoleCtrlHandler","Ptr",  0, "Int", true)   ; ignore Ctrl+C in AHK
+    DllCall("GenerateConsoleCtrlEvent", "UInt", 0, "UInt", 0) ; send CTRL_C_EVENT
+    Sleep 300
+    DllCall("FreeConsole")
+    DllCall("SetConsoleCtrlHandler","Ptr",  0, "Int", false)  ; restore AHK handler
 }
 
 ; Clean up on exit
@@ -92,22 +116,20 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     if FileExist(wavFile)
         FileDelete(wavFile)
 
-    ; Start actual recording
+    ; Start actual recording — hidden window, stopped via GenerateConsoleCtrlEvent
     cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' wavFile '"'
-    wsh := ComObject("WScript.Shell")
-    try {
-        ffmpegProc := wsh.Exec(cmd)
-    } catch as e {
+    try Run(cmd, , "Hide", &pid)
+    catch as e {
         isRecording := false
-        ToolTip "FFmpeg error: " e.Message
-        SetTimer () => ToolTip(), -3000
-        StartWarmFFmpeg()   ; restart warmup even on error
+        ShowTip("FFmpeg error: " e.Message, 3000)
+        StartWarmFFmpeg()
         return
     }
+    ffmpegProc := pid
 
     ; Device was already warm — only a short stabilization delay needed
     Sleep 150
-    ToolTip "Recording..."
+    ShowTip("Recording...")
 }
 
 *F8 Up:: {
@@ -117,15 +139,11 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
         return
 
     isRecording := false
-    ToolTip  ; clear recording tooltip
+    ToolTip()  ; clear
 
-    ; Stop FFmpeg recording
+    ; Stop FFmpeg recording gracefully (Ctrl+C → flushes WAV header)
     if ffmpegProc {
-        try {
-            ffmpegProc.StdIn.WriteLine("q")
-            ffmpegProc.StdIn.Close()
-        }
-        Sleep 300   ; let FFmpeg flush and write the WAV header
+        StopFFmpegGraceful(ffmpegProc)
         ffmpegProc := 0
     }
 
@@ -135,8 +153,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     wavFile := TMP_DIR "\recording.wav"
 
     if !FileExist(wavFile) {
-        ToolTip "Recording failed"
-        SetTimer () => ToolTip(), -2000
+        ShowTip("Recording failed", 2000)
         return
     }
 
@@ -148,13 +165,13 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     if FileExist(TMP_DIR "\recording.wav.txt")
         FileDelete(TMP_DIR "\recording.wav.txt")
 
-    ToolTip "Transcribing..."
+    ShowTip("Transcribing...")
 
     ; Run whisper.cpp via cmd.exe to capture stdout/stderr to log file
     whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' TMP_DIR '\recording" --beam-size 1 --no-timestamps -f "' wavFile '"'
     RunWait 'cmd.exe /c "' whisperCmd ' > "' logFile '" 2>&1"', , "Hide"
 
-    ToolTip  ; clear transcribing tooltip
+    ToolTip()  ; clear
 
     ; Some whisper.cpp builds output recording.wav.txt instead of recording.txt
     if !FileExist(txtFile) && FileExist(TMP_DIR "\recording.wav.txt")
@@ -169,8 +186,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     text := Trim(FileRead(txtFile, "UTF-8"))
 
     if text = "" {
-        ToolTip "No speech detected"
-        SetTimer () => ToolTip(), -2000
+        ShowTip("No speech detected", 2000)
         return
     }
 
@@ -184,8 +200,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     if ClipWait(2) {
         Send "^v"
     } else {
-        ToolTip "Clipboard error"
-        SetTimer () => ToolTip(), -2000
+        ShowTip("Clipboard error", 2000)
     }
     ; Restore previous clipboard after a short delay
     SetTimer () => (A_Clipboard := prevClip), -1500
