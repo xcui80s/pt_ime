@@ -44,16 +44,40 @@ global warmProc    := 0   ; pre-warm process — keeps audio device open between
 global targetWin   := 0
 
 ; ==============================================================================
-; Tooltip — fixed at bottom-center of primary monitor
+; HUD overlay — dark semi-transparent pill at bottom-center of screen
 ; ==============================================================================
 
-ShowTip(text, timeout := 0) {
-    w := StrLen(text) * 8 + 24   ; rough pixel width estimate
-    x := (A_ScreenWidth  - w)  // 2
-    y :=  A_ScreenHeight - 80
-    ToolTip(text, x, y)
+global tipGui := 0
+
+ShowTip(text, timeout := 0, color := "FFFFFF") {
+    global tipGui
+    HideTip()
+
+    g := Gui("+AlwaysOnTop -Caption")
+    g.MarginX := 20
+    g.MarginY := 12
+    g.BackColor := "202020"
+    g.SetFont("s13 bold", "Segoe UI")
+    g.Add("Text", "c" color, text)
+
+    ; Estimate window size to compute bottom-center position before Show
+    ; (avoids g.Move() which silently fails in hotkey thread context)
+    approxW := StrLen(text) * 9 + 40
+    x := (A_ScreenWidth - approxW) // 2
+    y := A_ScreenHeight - 100   ; ~100px from bottom, safely above taskbar
+    g.Show("AutoSize x" x " y" y)
+    tipGui := g
+
     if timeout > 0
-        SetTimer(() => ToolTip(), -timeout)
+        SetTimer(HideTip, -timeout)
+}
+
+HideTip() {
+    global tipGui
+    if IsObject(tipGui) {
+        try tipGui.Destroy()
+        tipGui := 0
+    }
 }
 
 ; ==============================================================================
@@ -91,7 +115,7 @@ StopFFmpegGraceful(pid) {
 }
 
 ; Clean up on exit
-OnExit((*) => StopWarmFFmpeg())
+OnExit((*) => (HideTip(), StopWarmFFmpeg()))
 
 ; Start warming up immediately on script load
 StartWarmFFmpeg()
@@ -111,30 +135,30 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     ; Save the window that should receive the pasted text
     targetWin := WinGetID("A")
     isRecording := true
+    ShowTip("Preparing...", 0, "AAAAAA")
 
-    ; Stop the warm-up process — device is already open, new process starts fast
-    StopWarmFFmpeg()
-    Sleep 50   ; brief gap to release the device handle
+    try {
+        ; Stop the warm-up process — device is already open, new process starts fast
+        StopWarmFFmpeg()
+        Sleep 50   ; brief gap to release the device handle
 
-    ; Remove previous recording
-    wavFile := TMP_DIR "\recording.wav"
-    if FileExist(wavFile)
-        FileDelete(wavFile)
+        ; FFmpeg -y flag overwrites the previous recording automatically
+        wavFile := TMP_DIR "\recording.wav"
 
-    ; Start actual recording — hidden window, stopped via GenerateConsoleCtrlEvent
-    cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' wavFile '"'
-    try Run(cmd, , "Hide", &pid)
-    catch as e {
+        ; Start actual recording — hidden window, stopped via GenerateConsoleCtrlEvent
+        cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' wavFile '"'
+        Run(cmd, , "Hide", &pid)
+        ffmpegProc := pid
+
+        ; Device was already warm — only a short stabilization delay needed
+        Sleep 150
+        ShowTip("● Recording...", 0, "FF6B6B")
+    } catch as e {
         isRecording := false
-        ShowTip("FFmpeg error: " e.Message, 3000)
+        ffmpegProc := 0
+        ShowTip("FFmpeg error: " e.Message, 3000, "FF6B6B")
         StartWarmFFmpeg()
-        return
     }
-    ffmpegProc := pid
-
-    ; Device was already warm — only a short stabilization delay needed
-    Sleep 150
-    ShowTip("Recording...")
 }
 
 *F8 Up:: {
@@ -144,7 +168,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
         return
 
     isRecording := false
-    ToolTip()  ; clear
+    HideTip()
 
     ; Stop FFmpeg recording gracefully (Ctrl+C → flushes WAV header)
     if ffmpegProc {
@@ -157,8 +181,9 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 
     wavFile := TMP_DIR "\recording.wav"
 
-    if !FileExist(wavFile) {
-        ShowTip("Recording failed", 2000)
+    ; Require at least ~0.5s of audio (16kHz mono 16-bit = 32KB/s → ~16KB min)
+    if !FileExist(wavFile) || FileGetSize(wavFile) < 16000 {
+        ShowTip("Recording too short", 2000, "888888")
         return
     }
 
@@ -170,13 +195,13 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     if FileExist(TMP_DIR "\recording.wav.txt")
         FileDelete(TMP_DIR "\recording.wav.txt")
 
-    ShowTip("Transcribing...")
+    ShowTip("◌ Transcribing...", 0, "6BB5FF")
 
     ; Run whisper.cpp via cmd.exe to capture stdout/stderr to log file
     whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' TMP_DIR '\recording" --beam-size 1 --no-timestamps --prompt "' PROMPT '" -f "' wavFile '"'
     RunWait 'cmd.exe /c "' whisperCmd ' > "' logFile '" 2>&1"', , "Hide"
 
-    ToolTip()  ; clear
+    HideTip()
 
     ; Some whisper.cpp builds output recording.wav.txt instead of recording.txt
     if !FileExist(txtFile) && FileExist(TMP_DIR "\recording.wav.txt")
@@ -191,7 +216,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     text := Trim(FileRead(txtFile, "UTF-8"))
 
     if text = "" {
-        ShowTip("No speech detected", 2000)
+        ShowTip("No speech detected", 2000, "888888")
         return
     }
 
@@ -205,7 +230,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     if ClipWait(2) {
         Send "^v"
     } else {
-        ShowTip("Clipboard error", 2000)
+        ShowTip("Clipboard error", 2000, "FF6B6B")
     }
     ; Restore previous clipboard after a short delay
     SetTimer () => (A_Clipboard := prevClip), -1500
