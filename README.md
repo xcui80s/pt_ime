@@ -69,7 +69,7 @@ If you don't have an NVIDIA GPU, download the non-CUDA zip. Transcription will b
    └── models\
        └── ggml-large-v3.bin
    ```
-3. If you chose a different model, update `MODEL_PATH` in `ptt.ahk` (see Step 5).
+3. If you chose a different model, update `MODEL_PATH` in `ptt.ahk` (see Step 6).
 
 ---
 

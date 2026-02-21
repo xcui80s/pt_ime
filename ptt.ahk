@@ -15,6 +15,10 @@ MODEL_PATH   := A_ScriptDir "\models\ggml-large-v3-turbo.bin"
 TMP_DIR      := A_ScriptDir "\tmp"
 LANGUAGE     := "auto"   ; "auto" for Chinese+English, "zh", or "en"
 
+; Initial prompt fed to whisper to encourage proper punctuation output.
+; Keep it in the target language(s) with varied punctuation marks.
+PROMPT       := "你好，这是一段语音输入。今天天气怎么样？很好！"
+
 ; ==============================================================================
 ; Startup checks
 ; ==============================================================================
@@ -91,6 +95,7 @@ OnExit((*) => StopWarmFFmpeg())
 
 ; Start warming up immediately on script load
 StartWarmFFmpeg()
+
 TrayTip "PTT Ready", "Hold F8 to record", 2
 
 ; ==============================================================================
@@ -168,7 +173,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     ShowTip("Transcribing...")
 
     ; Run whisper.cpp via cmd.exe to capture stdout/stderr to log file
-    whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' TMP_DIR '\recording" --beam-size 1 --no-timestamps -f "' wavFile '"'
+    whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' TMP_DIR '\recording" --beam-size 1 --no-timestamps --prompt "' PROMPT '" -f "' wavFile '"'
     RunWait 'cmd.exe /c "' whisperCmd ' > "' logFile '" 2>&1"', , "Hide"
 
     ToolTip()  ; clear
