@@ -13,7 +13,7 @@ WHISPER_EXE  := A_ScriptDir "\whisper\whisper-cli.exe"
 ; MODEL_PATH   := A_ScriptDir "\models\ggml-large-v3.bin"
 MODEL_PATH   := A_ScriptDir "\models\ggml-large-v3-turbo.bin"
 TMP_DIR      := A_ScriptDir "\tmp"
-WAV_FILE     := A_ScriptDir "\tmp\recording1.wav"
+WAV_BASENAME := "recording"   ; base name prefix — timestamp suffix added per press
 LANGUAGE     := "auto"   ; "auto" for Chinese+English, "zh", or "en"
 
 ; Initial prompt fed to whisper to encourage proper punctuation output.
@@ -39,10 +39,12 @@ DirCreate(TMP_DIR)
 ; State
 ; ==============================================================================
 
-global isRecording := false
-global ffmpegProc  := 0
-global warmProc    := 0   ; pre-warm process — keeps audio device open between presses
-global targetWin   := 0
+global isRecording    := false
+global ffmpegProc     := 0
+global warmProc       := 0   ; pre-warm process — keeps audio device open between presses
+global targetWin      := 0
+global sessionWavFile := ""  ; WAV path for the current recording session
+global sessionTxtFile := ""  ; transcript path for the current recording session
 
 ; ==============================================================================
 ; HUD overlay — dark semi-transparent pill at bottom-center of screen
@@ -150,7 +152,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 ; ==============================================================================
 
 *F8:: {
-    global isRecording, ffmpegProc, warmProc, WAV_FILE, AUDIO_DEVICE, targetWin
+    global isRecording, ffmpegProc, warmProc, WAV_BASENAME, TMP_DIR, AUDIO_DEVICE, targetWin, sessionWavFile, sessionTxtFile
 
     if isRecording
         return
@@ -161,14 +163,17 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     ShowTip("Preparing...", 0, "AAAAAA")
 
     try {
+        ; Build timestamped paths for this session
+        _ts := FormatTime(, "yyyyMMdd_HHmmss")
+        sessionWavFile := TMP_DIR "\" WAV_BASENAME "_" _ts ".wav"
+        sessionTxtFile := TMP_DIR "\" WAV_BASENAME "_" _ts "_transcript.txt"
+
         ; Stop the warm-up process — device is already open, new process starts fast
         StopWarmFFmpeg()
         Sleep 50   ; brief gap to release the device handle
 
-        ; FFmpeg -y flag overwrites the previous recording automatically
-
         ; Start actual recording — hidden window, stopped via GenerateConsoleCtrlEvent
-        cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' WAV_FILE '"'
+        cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' sessionWavFile '"'
         Run(cmd, , "Hide", &pid)
         ffmpegProc := pid
 
@@ -184,7 +189,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 }
 
 *F8 Up:: {
-    global isRecording, ffmpegProc, WAV_FILE, TMP_DIR, WHISPER_EXE, MODEL_PATH, LANGUAGE, targetWin
+    global isRecording, ffmpegProc, sessionWavFile, sessionTxtFile, TMP_DIR, WHISPER_EXE, MODEL_PATH, LANGUAGE, targetWin
 
     if !isRecording
         return
@@ -203,30 +208,25 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     StartWarmFFmpeg()
 
     ; Require at least ~0.5s of audio (16kHz mono 16-bit = 32KB/s → ~16KB min)
-    if !FileExist(WAV_FILE) || FileGetSize(WAV_FILE) < 16000 {
+    if !FileExist(sessionWavFile) || FileGetSize(sessionWavFile) < 16000 {
         ShowTip("Recording too short", 2000, "AAAAAA")
         return
     }
 
-    ; Remove previous transcript and log
-    txtFile := TMP_DIR "\recording.txt"
+    ; sessionTxtFile is the expected output; delete stale copy if present
+    txtFile := sessionTxtFile
     logFile := TMP_DIR "\whisper.log"
     if FileExist(txtFile)
         FileDelete(txtFile)
-    if FileExist(WAV_FILE ".txt")
-        FileDelete(WAV_FILE ".txt")
 
     ShowTip("◌ Transcribing...", 0, "6BB5FF")
 
     ; Run whisper.cpp via cmd.exe to capture stdout/stderr to log file
-    whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' TMP_DIR '\recording" --beam-size 1 --no-timestamps --prompt "' PROMPT '" -f "' WAV_FILE '"'
+    ; --output-file receives the path without .txt extension (whisper appends it)
+    whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' SubStr(sessionTxtFile, 1, -4) '" --beam-size 1 --no-timestamps --prompt "' PROMPT '" -f "' sessionWavFile '"'
     RunWait 'cmd.exe /c "' whisperCmd ' > "' logFile '" 2>&1"', , "Hide"
 
     HideTip()
-
-    ; Some whisper.cpp builds output recording.wav.txt instead of recording.txt
-    if !FileExist(txtFile) && FileExist(WAV_FILE ".txt")
-        txtFile := WAV_FILE ".txt"
 
     if !FileExist(txtFile) {
         log := FileExist(logFile) ? FileRead(logFile) : "(no log output)"
