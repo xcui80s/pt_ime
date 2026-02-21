@@ -13,11 +13,12 @@ WHISPER_EXE  := A_ScriptDir "\whisper\whisper-cli.exe"
 ; MODEL_PATH   := A_ScriptDir "\models\ggml-large-v3.bin"
 MODEL_PATH   := A_ScriptDir "\models\ggml-large-v3-turbo.bin"
 TMP_DIR      := A_ScriptDir "\tmp"
+WAV_FILE     := A_ScriptDir "\tmp\recording1.wav"
 LANGUAGE     := "auto"   ; "auto" for Chinese+English, "zh", or "en"
 
 ; Initial prompt fed to whisper to encourage proper punctuation output.
 ; Keep it in the target language(s) with varied punctuation marks.
-PROMPT       := "你好，这是一段语音输入。今天天气怎么样？很好！"
+PROMPT       := "输出简体中文。你好，这是一段语音输入。今天天气怎么样？很好！"
 
 ; ==============================================================================
 ; Startup checks
@@ -49,24 +50,45 @@ global targetWin   := 0
 
 global tipGui := 0
 
-ShowTip(text, timeout := 0, color := "FFFFFF") {
+ShowTip(text, timeout := 0, color := "EEEEEE") {
     global tipGui
     HideTip()
 
     g := Gui("+AlwaysOnTop -Caption")
-    g.MarginX := 20
-    g.MarginY := 12
-    g.BackColor := "202020"
+    g.MarginX := 24
+    g.MarginY := 14
+    g.BackColor := "181818"
     g.SetFont("s13 bold", "Segoe UI")
-    g.Add("Text", "c" color, text)
+    g.Add("Text", "c" color " Center", text)
 
-    ; Estimate window size to compute bottom-center position before Show
-    ; (avoids g.Move() which silently fails in hotkey thread context)
-    approxW := StrLen(text) * 9 + 40
+    ; Pre-compute bottom-center position (g.Move() silently fails in hotkey context)
+    approxW := StrLen(text) * 9 + 48
     x := (A_ScreenWidth - approxW) // 2
-    y := A_ScreenHeight - 100   ; ~100px from bottom, safely above taskbar
+    y := A_ScreenHeight - 110
     g.Show("AutoSize x" x " y" y)
     tipGui := g
+
+    ; Rounded pill corners — read actual window size after Show
+    WinGetPos(, , &w, &h, g)
+    if (w > 0 && h > 0) {
+        hRgn := DllCall("CreateRoundRectRgn", "Int", 0, "Int", 0,
+                        "Int", w+1, "Int", h+1, "Int", 26, "Int", 26, "Ptr")
+        DllCall("SetWindowRgn", "Ptr", g.Hwnd, "Ptr", hRgn, "Int", true)
+    }
+
+    ; iOS dark-mode acrylic frosted glass (Windows 10 1803+)
+    ; GradientColor ABGR: 0x80181818 = dark grey tint at ~50% over blurred background
+    ap := Buffer(16, 0)
+    NumPut("UInt", 4,          ap, 0)   ; ACCENT_ENABLE_ACRYLICBLURBEHIND
+    NumPut("UInt", 2,          ap, 4)   ; AccentFlags
+    NumPut("UInt", 0x80181818, ap, 8)   ; GradientColor (ABGR)
+
+    ; WINCOMPATTRDATA: { DWORD attr, [pad on x64], PVOID data, SIZE_T size }
+    wca := Buffer(A_PtrSize = 8 ? 24 : 12, 0)
+    NumPut("UInt", 19,      wca, 0)
+    NumPut("Ptr",  ap.Ptr,  wca, A_PtrSize = 8 ? 8 : 4)
+    NumPut("UInt", 16,      wca, A_PtrSize = 8 ? 16 : 8)
+    DllCall("user32\SetWindowCompositionAttribute", "Ptr", g.Hwnd, "Ptr", wca)
 
     if timeout > 0
         SetTimer(HideTip, -timeout)
@@ -106,12 +128,13 @@ StopWarmFFmpeg() {
 StopFFmpegGraceful(pid) {
     if !pid
         return
-    DllCall("AttachConsole",        "UInt", pid)
-    DllCall("SetConsoleCtrlHandler","Ptr",  0, "Int", true)   ; ignore Ctrl+C in AHK
-    DllCall("GenerateConsoleCtrlEvent", "UInt", 0, "UInt", 0) ; send CTRL_C_EVENT
-    Sleep 300
+    DllCall("FreeConsole")                                       ; must detach first or AttachConsole fails
+    DllCall("AttachConsole",            "UInt", pid)
+    DllCall("SetConsoleCtrlHandler",    "Ptr",  0, "Int", true)  ; AHK ignores Ctrl+C
+    DllCall("GenerateConsoleCtrlEvent", "UInt", 0, "UInt", 0)    ; send to FFmpeg's console group
     DllCall("FreeConsole")
-    DllCall("SetConsoleCtrlHandler","Ptr",  0, "Int", false)  ; restore AHK handler
+    DllCall("SetConsoleCtrlHandler",    "Ptr",  0, "Int", false) ; restore
+    ProcessWaitClose(pid, 3)                                     ; wait up to 3s for FFmpeg to flush & exit
 }
 
 ; Clean up on exit
@@ -127,7 +150,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 ; ==============================================================================
 
 *F8:: {
-    global isRecording, ffmpegProc, warmProc, TMP_DIR, AUDIO_DEVICE, targetWin
+    global isRecording, ffmpegProc, warmProc, WAV_FILE, AUDIO_DEVICE, targetWin
 
     if isRecording
         return
@@ -143,10 +166,9 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
         Sleep 50   ; brief gap to release the device handle
 
         ; FFmpeg -y flag overwrites the previous recording automatically
-        wavFile := TMP_DIR "\recording.wav"
 
         ; Start actual recording — hidden window, stopped via GenerateConsoleCtrlEvent
-        cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' wavFile '"'
+        cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' WAV_FILE '"'
         Run(cmd, , "Hide", &pid)
         ffmpegProc := pid
 
@@ -162,7 +184,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 }
 
 *F8 Up:: {
-    global isRecording, ffmpegProc, TMP_DIR, WHISPER_EXE, MODEL_PATH, LANGUAGE, targetWin
+    global isRecording, ffmpegProc, WAV_FILE, TMP_DIR, WHISPER_EXE, MODEL_PATH, LANGUAGE, targetWin
 
     if !isRecording
         return
@@ -171,6 +193,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     HideTip()
 
     ; Stop FFmpeg recording gracefully (Ctrl+C → flushes WAV header)
+    ; ProcessWaitClose inside StopFFmpegGraceful ensures the file is fully written
     if ffmpegProc {
         StopFFmpegGraceful(ffmpegProc)
         ffmpegProc := 0
@@ -179,11 +202,9 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     ; Restart warmup immediately so next press is also instant
     StartWarmFFmpeg()
 
-    wavFile := TMP_DIR "\recording.wav"
-
     ; Require at least ~0.5s of audio (16kHz mono 16-bit = 32KB/s → ~16KB min)
-    if !FileExist(wavFile) || FileGetSize(wavFile) < 16000 {
-        ShowTip("Recording too short", 2000, "888888")
+    if !FileExist(WAV_FILE) || FileGetSize(WAV_FILE) < 16000 {
+        ShowTip("Recording too short", 2000, "AAAAAA")
         return
     }
 
@@ -192,20 +213,20 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     logFile := TMP_DIR "\whisper.log"
     if FileExist(txtFile)
         FileDelete(txtFile)
-    if FileExist(TMP_DIR "\recording.wav.txt")
-        FileDelete(TMP_DIR "\recording.wav.txt")
+    if FileExist(WAV_FILE ".txt")
+        FileDelete(WAV_FILE ".txt")
 
     ShowTip("◌ Transcribing...", 0, "6BB5FF")
 
     ; Run whisper.cpp via cmd.exe to capture stdout/stderr to log file
-    whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' TMP_DIR '\recording" --beam-size 1 --no-timestamps --prompt "' PROMPT '" -f "' wavFile '"'
+    whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' TMP_DIR '\recording" --beam-size 1 --no-timestamps --prompt "' PROMPT '" -f "' WAV_FILE '"'
     RunWait 'cmd.exe /c "' whisperCmd ' > "' logFile '" 2>&1"', , "Hide"
 
     HideTip()
 
     ; Some whisper.cpp builds output recording.wav.txt instead of recording.txt
-    if !FileExist(txtFile) && FileExist(TMP_DIR "\recording.wav.txt")
-        txtFile := TMP_DIR "\recording.wav.txt"
+    if !FileExist(txtFile) && FileExist(WAV_FILE ".txt")
+        txtFile := WAV_FILE ".txt"
 
     if !FileExist(txtFile) {
         log := FileExist(logFile) ? FileRead(logFile) : "(no log output)"
@@ -216,7 +237,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     text := Trim(FileRead(txtFile, "UTF-8"))
 
     if text = "" {
-        ShowTip("No speech detected", 2000, "888888")
+        ShowTip("No speech detected", 2000, "AAAAAA")
         return
     }
 
