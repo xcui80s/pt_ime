@@ -9,29 +9,17 @@
 ;   ffmpeg -list_devices true -f dshow -i dummy
 AUDIO_DEVICE := "AnkerWork B600 Video Bar (AnkerWork B600 Video Bar)"
 
-WHISPER_EXE  := A_ScriptDir "\whisper\whisper-cli.exe"
-; MODEL_PATH   := A_ScriptDir "\models\ggml-large-v3.bin"
-MODEL_PATH   := A_ScriptDir "\models\ggml-large-v3-turbo.bin"
+; whisper.cpp server — run start_whisper_server.bat on the GPU machine first
+; Set WHISPER_HOST to "127.0.0.1" if the server runs on this machine,
+; or the server's LAN IP (e.g. "192.168.1.10") for remote transcription.
+WHISPER_HOST := "127.0.0.1"
+WHISPER_PORT := 8989
+
 TMP_DIR      := A_ScriptDir "\tmp"
 WAV_BASENAME := "recording"   ; base name prefix — timestamp suffix added per press
 LANGUAGE     := "auto"   ; "auto" for Chinese+English, "zh", or "en"
-
-; Initial prompt fed to whisper to encourage proper punctuation output.
-; Keep it in the target language(s) with varied punctuation marks.
 PROMPT       := "输出简体中文。你好，这是一段语音输入。今天天气怎么样？很好！"
 
-; ==============================================================================
-; Startup checks
-; ==============================================================================
-
-if !FileExist(WHISPER_EXE) {
-    MsgBox "whisper-cli.exe not found at:`n" WHISPER_EXE "`n`nPlace the whisper.cpp binary in the whisper\ folder.", "PTT Setup", "Icon!"
-    ExitApp
-}
-if !FileExist(MODEL_PATH) {
-    MsgBox "Model file not found at:`n" MODEL_PATH "`n`nDownload a .bin model and place it in the models\ folder.", "PTT Setup", "Icon!"
-    ExitApp
-}
 
 DirCreate(TMP_DIR)
 
@@ -189,7 +177,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 }
 
 *F8 Up:: {
-    global isRecording, ffmpegProc, sessionWavFile, sessionTxtFile, TMP_DIR, WHISPER_EXE, MODEL_PATH, LANGUAGE, targetWin
+    global isRecording, ffmpegProc, sessionWavFile, sessionTxtFile, TMP_DIR, WHISPER_HOST, WHISPER_PORT, LANGUAGE, PROMPT, targetWin
 
     if !isRecording
         return
@@ -213,28 +201,28 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
         return
     }
 
-    ; sessionTxtFile is the expected output; delete stale copy if present
-    txtFile := sessionTxtFile
-    logFile := TMP_DIR "\whisper.log"
-    if FileExist(txtFile)
-        FileDelete(txtFile)
-
     ShowTip("◌ Transcribing...", 0, "6BB5FF")
 
-    ; Run whisper.cpp via cmd.exe to capture stdout/stderr to log file
-    ; --output-file receives the path without .txt extension (whisper appends it)
-    whisperCmd := '"' WHISPER_EXE '" -m "' MODEL_PATH '" -l ' LANGUAGE ' --output-txt --output-file "' SubStr(sessionTxtFile, 1, -4) '" --beam-size 1 --no-timestamps --prompt "' PROMPT '" -f "' sessionWavFile '"'
-    RunWait 'cmd.exe /c "' whisperCmd ' > "' logFile '" 2>&1"', , "Hide"
+    ; POST WAV to whisper.cpp server; response_format=text returns plain transcription
+    logFile := TMP_DIR "\whisper.log"
+    langParam := (LANGUAGE = "auto") ? "" : " -F language=" LANGUAGE
+    RunWait 'cmd.exe /c curl -s --max-time 30 -X POST http://' WHISPER_HOST ':' WHISPER_PORT '/inference'
+          . ' -F file=@"' sessionWavFile '"'
+          . langParam
+          . ' -F response_format=text'
+          . ' -F "prompt=' PROMPT '"'
+          . ' > "' logFile '" 2>&1', , "Hide"
 
     HideTip()
 
-    if !FileExist(txtFile) {
-        log := FileExist(logFile) ? FileRead(logFile) : "(no log output)"
-        MsgBox "Transcription failed.`n`nwhisper.cpp output:`n" log, "PTT Error", "Icon!"
+    text := Trim(FileRead(logFile, "UTF-8"))
+    if text = "" || SubStr(text, 1, 6) = "curl: " {
+        ShowTip("Transcription failed", 2000, "FF6B6B")
         return
     }
 
-    text := Trim(FileRead(txtFile, "UTF-8"))
+    ; Persist transcript locally alongside the WAV file
+    FileAppend text "`n", sessionTxtFile, "UTF-8"
 
     if text = "" {
         ShowTip("No speech detected", 2000, "AAAAAA")
