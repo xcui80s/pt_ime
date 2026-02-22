@@ -33,6 +33,16 @@ global warmProc       := 0   ; pre-warm process — keeps audio device open betw
 global targetWin      := 0
 global sessionWavFile := ""  ; WAV path for the current recording session
 global sessionTxtFile := ""  ; transcript path for the current recording session
+global LOG_FILE       := TMP_DIR "\ptt.log"
+
+; ==============================================================================
+; Logging — append timestamped lines to tmp\ptt.log
+; ==============================================================================
+
+Log(msg) {
+    global LOG_FILE
+    FileAppend FormatTime(, "yyyy-MM-dd HH:mm:ss") "  " msg "`n", LOG_FILE, "UTF-8"
+}
 
 ; ==============================================================================
 ; HUD overlay — dark semi-transparent pill at bottom-center of screen
@@ -104,11 +114,13 @@ StartWarmFFmpeg() {
     catch
         return
     warmProc := pid
+    Log("Warmup started (pid " pid ")")
 }
 
 StopWarmFFmpeg() {
     global warmProc
     if warmProc {
+        Log("Warmup stopped")
         ProcessClose(warmProc)   ; warmup WAV is discarded, no need for graceful stop
         warmProc := 0
     }
@@ -128,9 +140,10 @@ StopFFmpegGraceful(pid) {
 }
 
 ; Clean up on exit
-OnExit((*) => (HideTip(), StopWarmFFmpeg()))
+OnExit((*) => (Log("=== PTT exiting ==="), HideTip(), StopWarmFFmpeg()))
 
 ; Start warming up immediately on script load
+Log("=== PTT started — device: " AUDIO_DEVICE " server: " WHISPER_HOST ":" WHISPER_PORT)
 StartWarmFFmpeg()
 
 TrayTip "PTT Ready", "Hold F8 to record", 2
@@ -144,6 +157,8 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 
     if isRecording
         return
+
+    Log("F8 pressed")
 
     ; Save the window that should receive the pasted text
     targetWin := WinGetID("A")
@@ -168,9 +183,11 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
         ; Device was already warm — only a short stabilization delay needed
         Sleep 150
         ShowTip("● Recording...", 0, "FF6B6B")
+        Log("Recording → " sessionWavFile " (pid " ffmpegProc ")")
     } catch as e {
         isRecording := false
         ffmpegProc := 0
+        Log("FFmpeg error: " e.Message)
         ShowTip("FFmpeg error: " e.Message, 3000, "FF6B6B")
         StartWarmFFmpeg()
     }
@@ -182,6 +199,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     if !isRecording
         return
 
+    Log("F8 released")
     isRecording := false
     HideTip()
 
@@ -197,10 +215,12 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 
     ; Require at least ~0.5s of audio (16kHz mono 16-bit = 32KB/s → ~16KB min)
     if !FileExist(sessionWavFile) || FileGetSize(sessionWavFile) < 16000 {
+        Log("WAV too short or missing: " sessionWavFile)
         ShowTip("Recording too short", 2000, "AAAAAA")
         return
     }
 
+    Log("Transcribing: " sessionWavFile " (" FileGetSize(sessionWavFile) " bytes)")
     ShowTip("◌ Transcribing...", 0, "6BB5FF")
 
     ; POST WAV to whisper.cpp server; response_format=text returns plain transcription
@@ -217,6 +237,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 
     text := Trim(FileRead(logFile, "UTF-8"))
     if text = "" || SubStr(text, 1, 6) = "curl: " {
+        Log("Transcription failed — " SubStr(text, 1, 120))
         ShowTip("Transcription failed", 2000, "FF6B6B")
         return
     }
@@ -225,9 +246,12 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     FileAppend text "`n", sessionTxtFile, "UTF-8"
 
     if text = "" {
+        Log("No speech detected")
         ShowTip("No speech detected", 2000, "AAAAAA")
         return
     }
+
+    Log("Transcribed (" StrLen(text) " chars): " SubStr(text, 1, 80))
 
     ; Reactivate the original window (RunWait/cmd.exe may have stolen focus)
     try WinActivate(targetWin)
@@ -238,7 +262,9 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     A_Clipboard := text
     if ClipWait(2) {
         Send "^v"
+        Log("Pasted to hwnd " targetWin)
     } else {
+        Log("Clipboard error")
         ShowTip("Clipboard error", 2000, "FF6B6B")
     }
     ; Restore previous clipboard after a short delay
