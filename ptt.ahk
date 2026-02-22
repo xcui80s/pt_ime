@@ -130,13 +130,15 @@ StopWarmFFmpeg() {
 StopFFmpegGraceful(pid) {
     if !pid
         return
+    Log("Stopping FFmpeg (pid " pid ")")
     DllCall("FreeConsole")                                       ; must detach first or AttachConsole fails
-    DllCall("AttachConsole",            "UInt", pid)
-    DllCall("SetConsoleCtrlHandler",    "Ptr",  0, "Int", true)  ; AHK ignores Ctrl+C
-    DllCall("GenerateConsoleCtrlEvent", "UInt", 0, "UInt", 0)    ; send to FFmpeg's console group
+    DllCall("SetConsoleCtrlHandler",    "Ptr",  0, "Int", true)  ; ignore Ctrl+C BEFORE joining console group
+    DllCall("AttachConsole",            "UInt", pid)             ; join FFmpeg's console group
+    DllCall("GenerateConsoleCtrlEvent", "UInt", 0, "UInt", 0)    ; send Ctrl+C to FFmpeg's console group
     DllCall("FreeConsole")
     DllCall("SetConsoleCtrlHandler",    "Ptr",  0, "Int", false) ; restore
     ProcessWaitClose(pid, 3)                                     ; wait up to 3s for FFmpeg to flush & exit
+    Log("FFmpeg stopped")
 }
 
 ; Clean up on exit
@@ -206,7 +208,11 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     ; Stop FFmpeg recording gracefully (Ctrl+C → flushes WAV header)
     ; ProcessWaitClose inside StopFFmpegGraceful ensures the file is fully written
     if ffmpegProc {
-        StopFFmpegGraceful(ffmpegProc)
+        try StopFFmpegGraceful(ffmpegProc)
+        catch as e {
+            Log("StopFFmpegGraceful failed: " e.Message " — force-killing")
+            try ProcessClose(ffmpegProc)
+        }
         ffmpegProc := 0
     }
 
