@@ -19,6 +19,7 @@ TMP_DIR      := A_ScriptDir "\tmp"
 WAV_BASENAME := "recording"   ; base name prefix — timestamp suffix added per press
 LANGUAGE     := "auto"   ; "auto" for Chinese+English, "zh", or "en"
 PROMPT       := "你好，这是一段语音输入。请把它转换成文字！检测中文和英文，中文输出简体中文。Hello, this is a voice input. Please convert it to text! Detect Chinese and English, output Chinese in simplified form."
+ENABLE_WARMUP := false   ; set to false to skip FFmpeg pre-warm (saves resources, slightly slower first press)
 
 
 DirCreate(TMP_DIR)
@@ -142,11 +143,12 @@ StopFFmpegGraceful(pid) {
 }
 
 ; Clean up on exit
-OnExit((*) => (Log("=== PTT exiting ==="), HideTip(), StopWarmFFmpeg()))
+OnExit((*) => (Log("=== PTT exiting ==="), HideTip(), ENABLE_WARMUP && StopWarmFFmpeg()))
 
 ; Start warming up immediately on script load
-Log("=== PTT started — device: " AUDIO_DEVICE " server: " WHISPER_HOST ":" WHISPER_PORT)
-StartWarmFFmpeg()
+Log("=== PTT started — device: " AUDIO_DEVICE " server: " WHISPER_HOST ":" WHISPER_PORT " warmup: " (ENABLE_WARMUP ? "on" : "off"))
+if ENABLE_WARMUP
+    StartWarmFFmpeg()
 
 TrayTip "PTT Ready", "Hold F8 to record", 2
 
@@ -155,7 +157,7 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
 ; ==============================================================================
 
 *F8:: {
-    global isRecording, ffmpegProc, warmProc, WAV_BASENAME, TMP_DIR, AUDIO_DEVICE, targetWin, sessionWavFile, sessionTxtFile
+    global isRecording, ffmpegProc, warmProc, WAV_BASENAME, TMP_DIR, AUDIO_DEVICE, ENABLE_WARMUP, targetWin, sessionWavFile, sessionTxtFile
 
     if isRecording
         return
@@ -173,17 +175,19 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
         sessionWavFile := TMP_DIR "\" WAV_BASENAME "_" _ts ".wav"
         sessionTxtFile := TMP_DIR "\" WAV_BASENAME "_" _ts "_transcript.txt"
 
-        ; Stop the warm-up process — device is already open, new process starts fast
-        StopWarmFFmpeg()
-        Sleep 50   ; brief gap to release the device handle
+        if ENABLE_WARMUP {
+            ; Stop the warm-up process — device is already open, new process starts fast
+            StopWarmFFmpeg()
+            Sleep 50   ; brief gap to release the device handle
+        }
 
         ; Start actual recording — hidden window, stopped via GenerateConsoleCtrlEvent
         cmd := 'ffmpeg -f dshow -i audio="' AUDIO_DEVICE '" -ar 16000 -ac 1 -y "' sessionWavFile '"'
         Run(cmd, , "Hide", &pid)
         ffmpegProc := pid
 
-        ; Device was already warm — only a short stabilization delay needed
-        Sleep 150
+        ; Short delay: less needed when device was pre-warmed, more when starting cold
+        Sleep ENABLE_WARMUP ? 150 : 400
         ShowTip("● Recording...", 0, "FF6B6B")
         Log("Recording → " sessionWavFile " (pid " ffmpegProc ")")
     } catch as e {
@@ -191,12 +195,13 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
         ffmpegProc := 0
         Log("FFmpeg error: " e.Message)
         ShowTip("FFmpeg error: " e.Message, 3000, "FF6B6B")
-        StartWarmFFmpeg()
+        if ENABLE_WARMUP
+            StartWarmFFmpeg()
     }
 }
 
 *F8 Up:: {
-    global isRecording, ffmpegProc, sessionWavFile, sessionTxtFile, TMP_DIR, WHISPER_HOST, WHISPER_PORT, LANGUAGE, PROMPT, targetWin
+    global isRecording, ffmpegProc, sessionWavFile, sessionTxtFile, TMP_DIR, WHISPER_HOST, WHISPER_PORT, LANGUAGE, PROMPT, ENABLE_WARMUP, targetWin
 
     if !isRecording
         return
@@ -217,7 +222,8 @@ TrayTip "PTT Ready", "Hold F8 to record", 2
     }
 
     ; Restart warmup immediately so next press is also instant
-    StartWarmFFmpeg()
+    if ENABLE_WARMUP
+        StartWarmFFmpeg()
 
     ; Require at least ~0.5s of audio (16kHz mono 16-bit = 32KB/s → ~16KB min)
     if !FileExist(sessionWavFile) || FileGetSize(sessionWavFile) < 16000 {
